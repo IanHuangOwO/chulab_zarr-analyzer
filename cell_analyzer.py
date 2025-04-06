@@ -73,9 +73,9 @@ def process_filter_chunk(block, filter_size, filter_sigma):
         radius_z=filter_size
     )
     gpu_mask = cle.gaussian_blur(
-        source=gpu_mask, 
-        sigma_x=filter_sigma, 
-        sigma_y=filter_sigma, 
+        source=gpu_mask,
+        sigma_x=filter_sigma,
+        sigma_y=filter_sigma,
         sigma_z=filter_sigma
     )
     block = cle.pull(gpu_mask).astype(block.dtype)
