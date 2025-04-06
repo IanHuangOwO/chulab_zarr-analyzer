@@ -17,13 +17,14 @@ os.environ["PYOPENCL_NO_CACHE"] = "1"
 cle.select_device('GPU')
 
 '''
-python              f:\Lab\analyzer\cell_analyzer.py 
-mask_path           F:\Lab\others\YA_HAN\neun_mask_ome.zarr\0 
-annotation_path     F:\Lab\others\YA_HAN\annotation_ome.zarr\0 
-temp_path           F:\Lab\others\YA_HAN\neun_mask_process_0.zarr
-output_path         F:\Lab\others\YA_HAN\neun_output
---hemasphere_path   F:\Lab\others\YA_HAN\hemasphere_ome.zarr\0 
---chunk-size        128 128 128
+Usage:
+python cell_analyzer.py 
+    <mask_path>             F:\Lab\others\YA_HAN\neun_mask_ome.zarr\0 
+    <annotation_path>       F:\Lab\others\YA_HAN\annotation_ome.zarr\0 
+    <temp_path>             F:\Lab\others\YA_HAN\neun_mask_process_0.zarr
+    <output_path>           F:\Lab\others\YA_HAN\neun_output
+    --hemasphere_path       F:\Lab\others\YA_HAN\hemasphere_ome.zarr\0 
+    --chunk-size            128 128 128
 '''
 
 def check_and_load_zarr(path, component=None, chunk_size=None):
@@ -149,7 +150,7 @@ def main():
     full_brain_signal_dict = {}
     left_brain_signal_dict = {}
     right_brain_signal_dict = {}
-    z_per_process = 128
+    z_per_process = 16
     img_dimension = mask_data.shape
     
     print("🔄 Processing unique values and counts...")
