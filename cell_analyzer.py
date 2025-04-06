@@ -44,9 +44,8 @@ def check_and_load_zarr(path, component=None, chunk_size=None):
         return None
 
     full_path = os.path.join(path, component) if component else path
-
     if os.path.exists(full_path):
-        print(f"Found: {full_path}! Loading data...")
+        print(f"✅ Found: {full_path}! Loading data...")
 
         # Load Zarr dataset with specified chunk size or auto-chunks
         return da.from_zarr(full_path, chunks=chunk_size) if chunk_size else da.from_zarr(full_path)

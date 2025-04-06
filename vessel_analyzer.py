@@ -1,3 +1,13 @@
+"""
+python              vessel_analyzer.py 
+mask_path           lectin_mask_ome.zarr
+annotation_path     annotation_ome.zarr
+temp_path           lectin_mask_process_0.zarr
+output_path         lectin_output
+--hemasphere_path   hemasphere_ome.zarr
+--chunk-size        128 128 128
+"""
+
 import time
 import os
 import argparse
@@ -19,16 +29,6 @@ os.environ["PYOPENCL_COMPILER_OUTPUT"] = "0"
 os.environ["PYOPENCL_NO_CACHE"] = "1"
 cle.select_device('GPU')
 
-'''
-python              f:/Lab/analyzer/vessel_analyzer.py 
-mask_path           F:\Lab\others\YA_HAN\lectin_mask_ome.zarr\0 
-annotation_path     F:\Lab\others\YA_HAN\annotation_ome.zarr\0 
-temp_path           F:\Lab\others\YA_HAN\lectin_mask_process_0.zarr
-output_path         F:\Lab\others\YA_HAN\lectin_output
---hemasphere_path   F:\Lab\others\YA_HAN\hemasphere_ome.zarr\0 
---chunk-size        128 128 128
-'''
-
 def check_and_load_zarr(path, component=None, chunk_size=None):
     """
     Check and load a Zarr array from a given path and component.
@@ -41,6 +41,9 @@ def check_and_load_zarr(path, component=None, chunk_size=None):
     Returns:
         dask.array.Array or None
     """
+    if not path:
+        return None
+
     full_path = os.path.join(path, component) if component else path
     if os.path.exists(full_path):
         print(f"✅ Found: {full_path}! Loading data...")
@@ -50,9 +53,17 @@ def check_and_load_zarr(path, component=None, chunk_size=None):
 def process_filter_chunk(block, filter_sigma):
     """Apply Gaussian filter to a chunk using GPU (pyclesperanto)."""
     gpu_mask = cle.push(block.astype(np.float32))
-    gpu_mask = cle.gaussian_blur(gpu_mask, sigma_x=filter_sigma, sigma_y=filter_sigma, sigma_z=filter_sigma)
+    gpu_mask = cle.gaussian_blur(
+        source=gpu_mask,
+        sigma_x=filter_sigma,
+        sigma_y=filter_sigma,
+        sigma_z=filter_sigma
+    )
     block = cle.pull(gpu_mask).astype(block.dtype)
-    max_val = np.iinfo(block.dtype).max if np.issubdtype(block.dtype, np.integer) else np.finfo(block.dtype).max
+    if np.issubdtype(block.dtype, np.integer):
+        max_val = np.iinfo(block.dtype).max
+    else:
+        max_val = np.finfo(block.dtype).max
     block[block > 0.5] = max_val
     return block
 
@@ -95,14 +106,54 @@ def process_calculation_chunk(anno, hema, mask, skel, dist):
     """
     return dict(numba_unique_vessel(anno, hema, mask, skel, dist))
 
-def process_analysis_report(full_brain_signal, left_brain_signal, right_brain_signal, voxel, output_name, output_path, structure_path='./structures.csv', target_id=None):
-    """Generate Excel reports from signal dictionaries."""
+def process_analysis_report(region_signals, voxel, output_name, output_path):
+    """
+    Generate Excel reports from signal dictionaries for multiple brain regions.
+
+    Parameters:
+        region_signals (dict): Keys are region names, values are signal dictionaries.
+        voxel (tuple): Voxel size as a 3D tuple (x, y, z).
+        output_name (str): Base name for the output files.
+        output_path (str): Directory to save the reports.
+        structure_path (str): Path to the structure CSV file.
+        target_id (int, optional): ID for filtering specific brain structures.
+    """
+    structure_path='./structures.csv'
+    target_id=None
+
     os.makedirs(output_path, exist_ok=True)
-    create_vessel_report(full_brain_signal, np.prod(voxel), os.path.join(output_path, f'{output_name}_full_brain_report.xlsx'), structure_path, target_id)
-    create_vessel_report(left_brain_signal, np.prod(voxel), os.path.join(output_path, f'{output_name}_left_brain_report.xlsx'), structure_path, target_id)
-    create_vessel_report(right_brain_signal, np.prod(voxel), os.path.join(output_path, f'{output_name}_right_brain_report.xlsx'), structure_path, target_id)
+    voxel_volume = np.prod(voxel)
+
+    for region_name, signal in region_signals.items():
+        output_file = os.path.join(output_path, f'{output_name}_{region_name}_report.xlsx')
+        create_vessel_report(signal, voxel_volume, output_file, structure_path, target_id)
 
 def main():
+    """
+    Main function for full 3D vessel analysis pipeline using Dask and GPU-accelerated image processing.
+
+    This pipeline processes a vessel mask and generates a statistical report containing
+    volume, length, radius, and other vessel-related features for full brain and each hemisphere.
+
+    Steps performed:
+    1. Parse command-line arguments.
+    2. Load Zarr datasets for vessel mask, annotation, and optional hemisphere segmentation.
+    3. Apply a Gaussian filter to smooth the input vessel mask.
+    4. Skeletonize the filtered mask to extract vessel centerlines.
+    5. Compute a distance transform to estimate vessel radius.
+    6. Extract vessel features in chunks, aggregating statistics for each brain region.
+    7. Generate Excel reports summarizing the extracted features.
+
+    Command-line arguments:
+        mask_path (str): Zarr path to the vessel mask.
+        annotation_path (str): Zarr path to annotation labels.
+        temp_path (str): Path to store intermediate Zarr data (filtered, skeletonized, distance).
+        output_path (str): Output directory for the final Excel report.
+        --hemasphere_path (str, optional): Zarr path to hemisphere segmentation.
+        --voxel (float, optional): Voxel size for volume calculation. Default: (0.004, 0.00182, 0.00182).
+        --chunk-size (int, optional): Custom Dask chunk size (space-separated).
+        --filter-sigma (float, optional): Sigma for Gaussian filtering. Default: 0.3.
+    """
     parser = argparse.ArgumentParser(description="Full 3D vessel analysis pipeline.")
     parser.add_argument("mask_path", type=str, help="Zarr path to the vessel mask.")
     parser.add_argument("annotation_path", type=str, help="Zarr path to annotation labels.")
@@ -116,26 +167,27 @@ def main():
                         help="Optional: Override chunk size for Dask processing (space-separated)")
     parser.add_argument("--filter-sigma", type=float, default=0.3, 
                         help="Sigma of the gaussian filter (default: 0.3)")
-    
+
     args = parser.parse_args()
     chunk_size = tuple(args.chunk_size) if args.chunk_size else None
-    
+
     start_time = time.time()
     # Load datasets
     mask_data = check_and_load_zarr(args.mask_path, chunk_size=chunk_size)
     anno_data = check_and_load_zarr(args.annotation_path, chunk_size=chunk_size)
-    hema_data = check_and_load_zarr(args.hemasphere_path, chunk_size=chunk_size) if args.hemasphere_path else None
-    
+    hema_data = check_and_load_zarr(args.hemasphere_path, chunk_size=chunk_size)
+
     print(f"Mask shape: {mask_data.shape}")
     print(f"Annotation shape: {anno_data.shape}")
-    
+
     # Step 1: Filtering
     filtered_data = check_and_load_zarr(args.temp_path, "filtered_mask", chunk_size=chunk_size)
     if filtered_data is None:
         print("🔄 Applying Gaussian filter...")
         with ProgressBar():
             filtered_data = da.map_overlap(
-                process_filter_chunk, mask_data, depth=16, boundary='reflect', filter_sigma=args.filter_sigma
+                process_filter_chunk,
+                mask_data, depth=16, boundary='reflect', filter_sigma=args.filter_sigma
             )
             filtered_data.to_zarr(os.path.join(args.temp_path, "filtered_mask"), overwrite=True)
             filtered_data = da.from_zarr(os.path.join(args.temp_path, "filtered_mask"))
@@ -146,7 +198,8 @@ def main():
         print("🔄 Skeletonizing vessel mask...")
         with ProgressBar():
             skeleton_data = da.map_overlap(
-                process_skeletonize_chunk, filtered_data, depth=2, dtype=np.uint16, boundary='reflect'
+                process_skeletonize_chunk,
+                filtered_data, depth=2, dtype=np.uint16, boundary='reflect'
             )
             skeleton_data.to_zarr(os.path.join(args.temp_path, "skeletonize_mask"), overwrite=True)
             skeleton_data = da.from_zarr(os.path.join(args.temp_path, "skeletonize_mask"))
@@ -157,19 +210,20 @@ def main():
         print("🔄 Calculating distance transform...")
         with ProgressBar():
             distance_data = da.map_overlap(
-                process_distance_transform, filtered_data, depth=2, dtype=np.float32, boundary='reflect'
+                process_distance_transform,
+                filtered_data, depth=2, dtype=np.float32, boundary='reflect'
             )
             distance_data.to_zarr(os.path.join(args.temp_path, "distance_mask"), overwrite=True)
             distance_data = da.from_zarr(os.path.join(args.temp_path, "distance_mask"))
 
     # Step 4: Feature Extraction
     print("🔄 Extracting features...")
-    full_brain_signal_dict = {}
-    left_brain_signal_dict = {}
-    right_brain_signal_dict = {}
-    z_per_process = 128
+    full_brain_signal = {}
+    left_brain_signal = {}
+    right_brain_signal = {}
+    z_per_process = 16
     img_dimension = mask_data.shape
-    
+
     for i in tqdm(range(0, img_dimension[0], z_per_process)):
         start_i, end_i = i, min(i + z_per_process, img_dimension[0])
         if hema_data is None:
@@ -189,40 +243,45 @@ def main():
                 distance_data[start_i:end_i],
             )
 
-        result = process_calculation_chunk(anno_chunk, hema_chunk, mask_chunk, skel_chunk, dist_chunk)
-        
+        result = process_calculation_chunk(
+            anno=anno_chunk,
+            hema=hema_chunk,
+            mask=mask_chunk,
+            skel=skel_chunk,
+            dist=dist_chunk,
+        )
+
         for value, nums in result.items():
-            if value not in full_brain_signal_dict:
-                full_brain_signal_dict[value] = nums[:6]
+            if value not in full_brain_signal:
+                full_brain_signal[value] = nums[:6]
             else:
-                full_brain_signal_dict[value][:5] += nums[:5]
-                if nums[5] > full_brain_signal_dict[value][5]:
-                    full_brain_signal_dict[value][5] = nums[5]
+                full_brain_signal[value][:5] += nums[:5]
+                if nums[5] > full_brain_signal[value][5]:
+                    full_brain_signal[value][5] = nums[5]
 
-            if value not in left_brain_signal_dict:
-                left_brain_signal_dict[value] = nums[6:12]
+            if value not in left_brain_signal:
+                left_brain_signal[value] = nums[6:12]
             else:
-                left_brain_signal_dict[value][:5] += nums[6:11]
-                if nums[11] > left_brain_signal_dict[value][5]:
-                    left_brain_signal_dict[value][5] = nums[11]
+                left_brain_signal[value][:5] += nums[6:11]
+                if nums[11] > left_brain_signal[value][5]:
+                    left_brain_signal[value][5] = nums[11]
 
-            if value not in right_brain_signal_dict:
-                right_brain_signal_dict[value] = nums[12:]
+            if value not in right_brain_signal:
+                right_brain_signal[value] = nums[12:]
             else:
-                right_brain_signal_dict[value][:5] += nums[12:17]
-                if nums[17] > right_brain_signal_dict[value][5]:
-                    right_brain_signal_dict[value][5] = nums[17]
+                right_brain_signal[value][:5] += nums[12:17]
+                if nums[17] > right_brain_signal[value][5]:
+                    right_brain_signal[value][5] = nums[17]
 
     # Step 5: Report Generation
     print("📄 Generating final report...")
-    process_analysis_report(
-        full_brain_signal=full_brain_signal_dict,
-        left_brain_signal=left_brain_signal_dict,
-        right_brain_signal=right_brain_signal_dict,
-        voxel=tuple(args.voxel),
-        output_name='vessel',
-        output_path=args.output_path,
-    )
+    region_signals = {
+        'full_brain': full_brain_signal,
+        'left_brain': left_brain_signal,
+        'right_brain': right_brain_signal
+    }
+
+    process_analysis_report(region_signals, tuple(args.voxel), 'vessel', args.output_path)
 
     print(f"✅ Processing completed in {time.time() - start_time:.2f} seconds")
 
