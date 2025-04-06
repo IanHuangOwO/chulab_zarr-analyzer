@@ -144,6 +144,28 @@ def process_analysis_report(region_signals, voxel, output_name, output_path):
         create_cell_report(signal, voxel_volume, output_file, structure_path, target_id)
 
 def main():
+    """
+    Main function to process a 3D cell mask and generate analysis reports.
+
+    This function performs the following steps:
+    1. Parses command-line arguments for input/output Zarr paths and processing parameters.
+    2. Loads the input Zarr datasets for mask, annotation, and optionally hemisphere segmentation.
+    3. Applies a median box filter followed by a Gaussian blur using GPU acceleration.
+    4. Detects local maxima across the filtered image volume.
+    5. Computes signal counts and distributions across full, left, and right brain hemispheres.
+    6. Generates Excel reports for each region using the computed signals.
+
+    Command-line arguments:
+        mask_path (str): Path to the Zarr file containing the input cell mask.
+        annotation_path (str): Path to the annotation Zarr file.
+        temp_path (str): Temporary Zarr path to store intermediate filtered and maxima data.
+        output_path (str): Directory where final Excel reports will be saved.
+        --hemasphere_path (str, optional): Path to hemisphere segmentation Zarr file.
+        --voxel (float, optional): Voxel size for volume computation.
+        --chunk-size (int, optional): Override default chunk size for Dask processing.
+        --filter-size (int, optional): Size of the median filter kernel.
+        --filter-sigma (float, optional): Sigma value for the Gaussian blur.
+    """
     parser = argparse.ArgumentParser(
         description="Apply median filter to a Zarr file using Dask with map_overlap."
     )
