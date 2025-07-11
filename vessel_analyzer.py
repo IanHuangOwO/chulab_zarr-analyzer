@@ -2,7 +2,6 @@
 python              vessel_analyzer.py 
 mask_path           lectin_mask_ome.zarr
 annotation_path     annotation_ome.zarr
-temp_path           lectin_mask_process_0.zarr
 output_path         lectin_output
 --hemasphere_path   hemasphere_ome.zarr
 --chunk-size        128 128 128
@@ -46,7 +45,7 @@ def check_and_load_zarr(path, component=None, chunk_size=None):
 
     full_path = os.path.join(path, component) if component else path
     if os.path.exists(full_path):
-        print(f"✅ Found: {full_path}! Loading data...")
+        print(f"✅ Found: {full_path}")
         return da.from_zarr(full_path, chunks=chunk_size) if chunk_size else da.from_zarr(full_path)
     return None
 
@@ -147,7 +146,6 @@ def main():
     Command-line arguments:
         mask_path (str): Zarr path to the vessel mask.
         annotation_path (str): Zarr path to annotation labels.
-        temp_path (str): Path to store intermediate Zarr data (filtered, skeletonized, distance).
         output_path (str): Output directory for the final Excel report.
         --hemasphere_path (str, optional): Zarr path to hemisphere segmentation.
         --voxel (float, optional): Voxel size for volume calculation. Default: (0.004, 0.00182, 0.00182).
@@ -157,8 +155,7 @@ def main():
     parser = argparse.ArgumentParser(description="Full 3D vessel analysis pipeline.")
     parser.add_argument("mask_path", type=str, help="Zarr path to the vessel mask.")
     parser.add_argument("annotation_path", type=str, help="Zarr path to annotation labels.")
-    parser.add_argument("temp_path", type=str, help="Temporary Zarr path for intermediates.")
-    parser.add_argument("output_path", type=str, help="Output path for report.")
+    parser.add_argument("output_path", type=str, help="Output path for report and temporary zarr.")
     parser.add_argument("--hemasphere_path", type=str, default=None, 
                         help="Zarr path to hemisphere segmentation.")
     parser.add_argument("--voxel", type=float, nargs='+', default=(0.004, 0.00182, 0.00182), 
@@ -181,40 +178,40 @@ def main():
     print(f"Annotation shape: {anno_data.shape}")
 
     # Step 1: Filtering
-    filtered_data = check_and_load_zarr(args.temp_path, "filtered_mask", chunk_size=chunk_size)
-    if filtered_data is None:
-        print("🔄 Applying Gaussian filter...")
-        with ProgressBar():
-            filtered_data = da.map_overlap(
-                process_filter_chunk,
-                mask_data, depth=16, boundary='reflect', filter_sigma=args.filter_sigma
-            )
-            filtered_data.to_zarr(os.path.join(args.temp_path, "filtered_mask"), overwrite=True)
-            filtered_data = da.from_zarr(os.path.join(args.temp_path, "filtered_mask"))
+    # filtered_data = check_and_load_zarr(args.output_path, "filtered_mask.zarr", chunk_size=chunk_size)
+    # if filtered_data is None:
+    #     print("🔄 Applying Gaussian filter...")
+    #     with ProgressBar():
+    #         filtered_data = da.map_overlap(
+    #             process_filter_chunk,
+    #             mask_data, depth=16, boundary='reflect', filter_sigma=args.filter_sigma
+    #         )
+    #         filtered_data.to_zarr(os.path.join(args.output_path, "filtered_mask.zarr"), overwrite=True)
+    #         filtered_data = da.from_zarr(os.path.join(args.output_path, "filtered_mask.zarr"))
 
     # Step 2: Skeletonization
-    skeleton_data = check_and_load_zarr(args.temp_path, "skeletonize_mask", chunk_size=chunk_size)
+    skeleton_data = check_and_load_zarr(args.output_path, "skeletonize_mask.zarr", chunk_size=chunk_size)
     if skeleton_data is None:
         print("🔄 Skeletonizing vessel mask...")
         with ProgressBar():
             skeleton_data = da.map_overlap(
                 process_skeletonize_chunk,
-                filtered_data, depth=2, dtype=np.uint16, boundary='reflect'
+                mask_data, depth=2, dtype=np.uint16, boundary='reflect'
             )
-            skeleton_data.to_zarr(os.path.join(args.temp_path, "skeletonize_mask"), overwrite=True)
-            skeleton_data = da.from_zarr(os.path.join(args.temp_path, "skeletonize_mask"))
+            skeleton_data.to_zarr(os.path.join(args.output_path, "skeletonize_mask.zarr"), overwrite=True)
+            skeleton_data = da.from_zarr(os.path.join(args.output_path, "skeletonize_mask.zarr"))
 
     # Step 3: Distance Transform
-    distance_data = check_and_load_zarr(args.temp_path, "distance_mask", chunk_size=chunk_size)
+    distance_data = check_and_load_zarr(args.output_path, "distance_mask.zarr", chunk_size=chunk_size)
     if distance_data is None:
         print("🔄 Calculating distance transform...")
         with ProgressBar():
             distance_data = da.map_overlap(
                 process_distance_transform,
-                filtered_data, depth=2, dtype=np.float32, boundary='reflect'
+                mask_data, depth=2, dtype=np.float32, boundary='reflect'
             )
-            distance_data.to_zarr(os.path.join(args.temp_path, "distance_mask"), overwrite=True)
-            distance_data = da.from_zarr(os.path.join(args.temp_path, "distance_mask"))
+            distance_data.ZARR_OUT(os.path.join(args.output_path, "distance_mask.zarr"), overwrite=True)
+            distance_data = da.from_zarr(os.path.join(args.output_path, "distance_mask.zarr"))
 
     # Step 4: Feature Extraction
     print("🔄 Extracting features...")
@@ -229,7 +226,7 @@ def main():
         if hema_data is None:
             anno_chunk, mask_chunk, skel_chunk, dist_chunk = da.compute(
                 anno_data[start_i:end_i],
-                filtered_data[start_i:end_i],
+                mask_data[start_i:end_i], # change to filtered data
                 skeleton_data[start_i:end_i],
                 distance_data[start_i:end_i],
             )
@@ -238,7 +235,7 @@ def main():
             anno_chunk, hema_chunk, mask_chunk, skel_chunk, dist_chunk = da.compute(
                 anno_data[start_i:end_i],
                 hema_data[start_i:end_i],
-                filtered_data[start_i:end_i],
+                mask_data[start_i:end_i], # change to filtered data
                 skeleton_data[start_i:end_i],
                 distance_data[start_i:end_i],
             )

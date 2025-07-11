@@ -3,7 +3,6 @@ Usage:
 python cell_analyzer.py 
     <mask_path>             neun_mask_ome.zarr
     <annotation_path>       annotation_ome.zarr
-    <temp_path>             neun_mask_process.zarr
     <output_path>           neun_output
     --hemasphere_path       hemasphere_ome.zarr
     --chunk-size            128 128 128
@@ -22,9 +21,6 @@ from dask.diagnostics import ProgressBar
 from analyzer_count_tools import numba_unique_cell
 from analyzer_report_tools import create_cell_report
 
-# Disable OpenCL compiler logs
-os.environ["PYOPENCL_COMPILER_OUTPUT"] = "0"
-os.environ["PYOPENCL_NO_CACHE"] = "1"
 cle.select_device('GPU')
 
 def check_and_load_zarr(path, component=None, chunk_size=None):
@@ -45,7 +41,7 @@ def check_and_load_zarr(path, component=None, chunk_size=None):
 
     full_path = os.path.join(path, component) if component else path
     if os.path.exists(full_path):
-        print(f"✅ Found: {full_path}! Loading data...")
+        print(f"✅ Found: {full_path}")
 
         # Load Zarr dataset with specified chunk size or auto-chunks
         return da.from_zarr(full_path, chunks=chunk_size) if chunk_size else da.from_zarr(full_path)
@@ -65,12 +61,12 @@ def process_filter_chunk(block, filter_size, filter_sigma):
         np.ndarray: The filtered and thresholded image block.
     """
     gpu_mask = cle.push(block.astype(np.float32))
-    gpu_mask = cle.median_box(
-        source=gpu_mask,
-        radius_x=filter_size,
-        radius_y=filter_size,
-        radius_z=filter_size
-    )
+    # gpu_mask = cle.median_box(
+    #     source=gpu_mask,
+    #     radius_x=filter_size,
+    #     radius_y=filter_size,
+    #     radius_z=filter_size
+    # )
     gpu_mask = cle.gaussian_blur(
         source=gpu_mask,
         sigma_x=filter_sigma,
@@ -157,7 +153,6 @@ def main():
     Command-line arguments:
         mask_path (str): Path to the Zarr file containing the input cell mask.
         annotation_path (str): Path to the annotation Zarr file.
-        temp_path (str): Temporary Zarr path to store intermediate filtered and maxima data.
         output_path (str): Directory where final Excel reports will be saved.
         --hemasphere_path (str, optional): Path to hemisphere segmentation Zarr file.
         --voxel (float, optional): Voxel size for volume computation.
@@ -170,8 +165,7 @@ def main():
     )
     parser.add_argument("mask_path", type=str, help="Zarr path to cell mask to be filtered.")
     parser.add_argument("annotation_path", type=str, help="Zarr path to annotation")
-    parser.add_argument("temp_path", type=str, help="Zarr path for storing temporary data.")
-    parser.add_argument("output_path", type=str, help="Output path for the final report")
+    parser.add_argument("output_path", type=str, help="Output path for temporary zarr and final report")
     parser.add_argument("--hemasphere_path", type=str, default=None, 
                         help="Zarr path to hemisphere segmentation.")
     parser.add_argument("--voxel", type=float, nargs='+', default=(0.004, 0.00182, 0.00182),
@@ -195,36 +189,36 @@ def main():
     print(f"Mask shape: {mask_data.shape}")
     print(f"Annotation shape: {anno_data.shape}")
 
-    # **Step 1: Apply Filtering (Skip if Exists)**
-    filtered_data = check_and_load_zarr(args.temp_path, "filtered_mask", chunk_size=chunk_size)
-    if filtered_data is None:
-        with ProgressBar():
-            print("🔄 Applying filtering...")
-            filtered_data = da.map_overlap(
-                process_filter_chunk,
-                mask_data,
-                depth=16,
-                boundary='reflect',
-                filter_size=args.filter_size,
-                filter_sigma=args.filter_sigma,
-            )
-            filtered_data.to_zarr(os.path.join(args.temp_path, "filtered_mask"), overwrite=True)
-            filtered_data = da.from_zarr(os.path.join(args.temp_path, "filtered_mask"))
+    # # **Step 1: Apply Filtering (Skip if Exists)**
+    # filtered_data = check_and_load_zarr(args.output_path, "filtered_mask.zarr", chunk_size=chunk_size)
+    # if filtered_data is None:
+    #     with ProgressBar():
+    #         print("🔄 Applying filtering...")
+    #         filtered_data = da.map_overlap(
+    #             process_filter_chunk,
+    #             mask_data,
+    #             depth=16,
+    #             boundary='reflect',
+    #             filter_size=args.filter_size,
+    #             filter_sigma=args.filter_sigma,
+    #         )
+    #         filtered_data.to_zarr(os.path.join(args.output_path, "filtered_mask.zarr"), overwrite=True)
+    #         filtered_data = da.from_zarr(os.path.join(args.output_path, "filtered_mask.zarr"))
 
     # **Step 2: Compute Local Maxima (Skip if Exists)**
-    maxima_data = check_and_load_zarr(args.temp_path, "maxima_mask", chunk_size=chunk_size)
+    maxima_data = check_and_load_zarr(args.output_path, "maxima_mask.zarr", chunk_size=chunk_size)
     if maxima_data is None:
         with ProgressBar():
             print("🔄 Finding local maxima...")
             maxima_data = da.map_overlap(
                 process_local_maxima_chunk,
-                filtered_data,
+                mask_data,
                 depth=16,
                 dtype=np.uint16,
                 boundary='reflect',
             )
-            maxima_data.to_zarr(os.path.join(args.temp_path, "maxima_mask"), overwrite=True)
-            maxima_data = da.from_zarr(os.path.join(args.temp_path, "maxima_mask"))
+            maxima_data.to_zarr(os.path.join(args.output_path, "maxima_mask.zarr"), overwrite=True)
+            maxima_data = da.from_zarr(os.path.join(args.output_path, "maxima_mask.zarr"))
 
     # **Step 3: Process Unique Values and Counts**
     full_brain_signal = {}
