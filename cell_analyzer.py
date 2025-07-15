@@ -186,8 +186,8 @@ def main():
     anno_data = check_and_load_zarr(args.annotation_path, chunk_size=chunk_size)
     hema_data = check_and_load_zarr(args.hemasphere_path, chunk_size=chunk_size)
 
-    print(f"Mask shape: {mask_data.shape}")
-    print(f"Annotation shape: {anno_data.shape}")
+    print(f"Mask shape: {mask_data.shape}") # type: ignore
+    print(f"Annotation shape: {anno_data.shape}") # type: ignore
 
     # # **Step 1: Apply Filtering (Skip if Exists)**
     # filtered_data = check_and_load_zarr(args.output_path, "filtered_mask.zarr", chunk_size=chunk_size)
@@ -221,7 +221,7 @@ def main():
     left_brain_signal = {}
     right_brain_signal = {}
     z_per_process = 16
-    img_dimension = mask_data.shape
+    img_dimension = mask_data.shape # type: ignore
 
     print("🔄 Processing unique values and counts...")
     for i in tqdm(range(0, img_dimension[0], z_per_process)):
@@ -229,14 +229,14 @@ def main():
 
         if hema_data is None:
             anno_chunk, maxima_chunk,  = da.compute(
-                anno_data[start_i:end_i],
+                anno_data[start_i:end_i], # type: ignore
                 maxima_data[start_i:end_i],
             )
             hema_chunk = np.zeros_like(anno_chunk)
 
         else:
             anno_chunk, hema_chunk, maxima_chunk = da.compute(
-                anno_data[start_i:end_i],
+                anno_data[start_i:end_i], # type: ignore
                 hema_data[start_i:end_i],
                 maxima_data[start_i:end_i],
             )
