@@ -1,0 +1,9 @@
+zarr
+dask
+tqdm
+pyclesperanto_prototype
+scikit-image
+scipy
+numba
+pandas
+openpyxl

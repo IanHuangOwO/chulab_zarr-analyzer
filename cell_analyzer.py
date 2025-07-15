@@ -16,12 +16,12 @@ import pyclesperanto_prototype as cle
 import dask.array as da
 
 from tqdm import tqdm
-from dask.diagnostics import ProgressBar
+from dask.diagnostics.progress import ProgressBar
 
-from analyzer_count_tools import numba_unique_cell
-from analyzer_report_tools import create_cell_report
+from utils.analyzer_count_tools import numba_unique_cell
+from utils.analyzer_report_tools import create_cell_report
 
-cle.select_device('GPU')
+# cle.select_device('GPU')
 
 def check_and_load_zarr(path, component=None, chunk_size=None):
     """ 
@@ -61,12 +61,12 @@ def process_filter_chunk(block, filter_size, filter_sigma):
         np.ndarray: The filtered and thresholded image block.
     """
     gpu_mask = cle.push(block.astype(np.float32))
-    # gpu_mask = cle.median_box(
-    #     source=gpu_mask,
-    #     radius_x=filter_size,
-    #     radius_y=filter_size,
-    #     radius_z=filter_size
-    # )
+    gpu_mask = cle.median_box(
+        source=gpu_mask,
+        radius_x=filter_size,
+        radius_y=filter_size,
+        radius_z=filter_size
+    )
     gpu_mask = cle.gaussian_blur(
         source=gpu_mask,
         sigma_x=filter_sigma,
@@ -128,7 +128,7 @@ def process_analysis_report(region_signals, voxel, output_name, output_path):
         structure_path (str): Path to the structure CSV file.
         target_id (int, optional): ID for filtering specific brain structures.
     """
-    structure_path='./structures.csv'
+    structure_path='./utils/structures.csv'
     target_id=None
 
     os.makedirs(output_path, exist_ok=True)
@@ -194,11 +194,9 @@ def main():
     # if filtered_data is None:
     #     with ProgressBar():
     #         print("🔄 Applying filtering...")
-    #         filtered_data = da.map_overlap(
+    #         filtered_data = da.map_blocks(
     #             process_filter_chunk,
     #             mask_data,
-    #             depth=16,
-    #             boundary='reflect',
     #             filter_size=args.filter_size,
     #             filter_sigma=args.filter_sigma,
     #         )
@@ -210,12 +208,10 @@ def main():
     if maxima_data is None:
         with ProgressBar():
             print("🔄 Finding local maxima...")
-            maxima_data = da.map_overlap(
+            maxima_data = da.map_blocks(
                 process_local_maxima_chunk,
                 mask_data,
-                depth=16,
                 dtype=np.uint16,
-                boundary='reflect',
             )
             maxima_data.to_zarr(os.path.join(args.output_path, "maxima_mask.zarr"), overwrite=True)
             maxima_data = da.from_zarr(os.path.join(args.output_path, "maxima_mask.zarr"))

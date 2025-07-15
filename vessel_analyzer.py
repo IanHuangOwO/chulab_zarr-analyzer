@@ -15,18 +15,18 @@ import dask.array as da
 import pyclesperanto_prototype as cle
 
 from tqdm import tqdm
-from dask.diagnostics import ProgressBar
+from dask.diagnostics.progress import ProgressBar
 from skimage.morphology import skeletonize
 from skimage.measure import regionprops
 from scipy.ndimage import convolve, label, distance_transform_edt
 
-from analyzer_count_tools import numba_unique_vessel
-from analyzer_report_tools import create_vessel_report
+from utils.analyzer_count_tools import numba_unique_vessel
+from utils.analyzer_report_tools import create_vessel_report
 
 # Disable OpenCL compiler logs
 os.environ["PYOPENCL_COMPILER_OUTPUT"] = "0"
 os.environ["PYOPENCL_NO_CACHE"] = "1"
-cle.select_device('GPU')
+# cle.select_device('GPU')
 
 def check_and_load_zarr(path, component=None, chunk_size=None):
     """
@@ -117,7 +117,7 @@ def process_analysis_report(region_signals, voxel, output_name, output_path):
         structure_path (str): Path to the structure CSV file.
         target_id (int, optional): ID for filtering specific brain structures.
     """
-    structure_path='./structures.csv'
+    structure_path='./utils/structures.csv'
     target_id=None
 
     os.makedirs(output_path, exist_ok=True)
