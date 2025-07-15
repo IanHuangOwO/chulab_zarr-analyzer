@@ -86,7 +86,7 @@ python vessel_analyzer.py \
     --chunk-size 128 128 128
 ```
 
-- `mask_path`: Path to the neuron mask (e.g., `neun_mask_ome.zarr`)
+- `mask_path`: Path to the neuron mask (e.g., `lectin_mask_ome.zarr`)
 - `annotation_path`: Path to annotation zarr file
 - `output_path`: Directory to store result files
 - `--hemasphere_path`: (Optional) Path to another zarr dataset
