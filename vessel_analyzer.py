@@ -1,10 +1,10 @@
 """
-python              vessel_analyzer.py 
-mask_path           lectin_mask_ome.zarr
-annotation_path     annotation_ome.zarr
-output_path         lectin_output
---hemasphere_path   hemasphere_ome.zarr
---chunk-size        128 128 128
+Usage:
+python vessel_analyzer.py \
+    --mask_path             ./datas/lectin_mask_ome.zarr/0 \
+    --annotation_path       ./datas/annotation_ome.zarr/0 \
+    --output_path           ./datas/lectin_output_1 \
+    --chunk-size            128 128 128
 """
 
 import time
@@ -22,11 +22,6 @@ from scipy.ndimage import convolve, label, distance_transform_edt
 
 from utils.analyzer_count_tools import numba_unique_vessel
 from utils.analyzer_report_tools import create_vessel_report
-
-# Disable OpenCL compiler logs
-os.environ["PYOPENCL_COMPILER_OUTPUT"] = "0"
-os.environ["PYOPENCL_NO_CACHE"] = "1"
-# cle.select_device('GPU')
 
 def check_and_load_zarr(path, component=None, chunk_size=None):
     """
@@ -51,6 +46,7 @@ def check_and_load_zarr(path, component=None, chunk_size=None):
 
 def process_filter_chunk(block, filter_sigma):
     """Apply Gaussian filter to a chunk using GPU (pyclesperanto)."""
+    block[block > 0] = 1
     gpu_mask = cle.push(block.astype(np.float32))
     gpu_mask = cle.gaussian_blur(
         source=gpu_mask,
@@ -58,27 +54,23 @@ def process_filter_chunk(block, filter_sigma):
         sigma_y=filter_sigma,
         sigma_z=filter_sigma
     )
-    block = cle.pull(gpu_mask).astype(block.dtype)
-    if np.issubdtype(block.dtype, np.integer):
-        max_val = np.iinfo(block.dtype).max
-    else:
-        max_val = np.finfo(block.dtype).max
-    block[block > 0.5] = max_val
-    return block
+    gpu_mask = cle.pull(gpu_mask)
+    block[gpu_mask > 0.5] = 1
+    return block.astype(np.uint8)
 
 def process_skeletonize_chunk(block):
     """Skeletonize a binary 3D block and mark bifurcation points."""
-    block = (block > 0).astype(np.uint8)
-    skeleton = skeletonize(block).astype(block.dtype)
+    block[block > 0] = 1
+    skeleton = skeletonize(block.astype(np.uint8)).astype(np.uint8)
     skeleton *= block
 
     kernel = np.ones((3, 3, 3), dtype=np.uint8)
     kernel[1, 1, 1] = 0
     neighbor_count = convolve(skeleton, kernel, mode='constant')
     bifurcation_candidates = (skeleton > 0) & (neighbor_count >= 3)
-    labeled_array, _ = label(bifurcation_candidates)
+    labeled_array, _ = label(bifurcation_candidates)  # type: ignore
     labeled_array = labeled_array.astype(np.int32)
-
+    
     for region in regionprops(labeled_array):
         com = tuple(np.round(region.centroid).astype(int))
         skeleton[com] = 2
@@ -153,16 +145,16 @@ def main():
         --filter-sigma (float, optional): Sigma for Gaussian filtering. Default: 0.3.
     """
     parser = argparse.ArgumentParser(description="Full 3D vessel analysis pipeline.")
-    parser.add_argument("mask_path", type=str, help="Zarr path to the vessel mask.")
-    parser.add_argument("annotation_path", type=str, help="Zarr path to annotation labels.")
-    parser.add_argument("output_path", type=str, help="Output path for report and temporary zarr.")
+    parser.add_argument("--mask_path", type=str, required=True, help="Zarr path to the vessel mask.")
+    parser.add_argument("--annotation_path", type=str, required=True, help="Zarr path to annotation labels.")
+    parser.add_argument("--output_path", type=str, required=True, help="Output path for report and temporary zarr.")
     parser.add_argument("--hemasphere_path", type=str, default=None, 
                         help="Zarr path to hemisphere segmentation.")
     parser.add_argument("--voxel", type=float, nargs='+', default=(0.004, 0.00182, 0.00182), 
                         help="For final volume calculation. (default: 0.004, 0.00182, 0.00182)")
     parser.add_argument("--chunk-size", type=int, nargs='+', default=None, 
                         help="Optional: Override chunk size for Dask processing (space-separated)")
-    parser.add_argument("--filter-sigma", type=float, default=0.3, 
+    parser.add_argument("--filter-sigma", type=float, default=2, 
                         help="Sigma of the gaussian filter (default: 0.3)")
 
     args = parser.parse_args()
@@ -178,25 +170,25 @@ def main():
     print(f"Annotation shape: {anno_data.shape}") # type: ignore
 
     # Step 1: Filtering
-    # filtered_data = check_and_load_zarr(args.output_path, "filtered_mask.zarr", chunk_size=chunk_size)
-    # if filtered_data is None:
-    #     print("🔄 Applying Gaussian filter...")
-    #     with ProgressBar():
-    #         filtered_data = da.map_overlap(
-    #             process_filter_chunk,
-    #             mask_data, depth=16, boundary='reflect', filter_sigma=args.filter_sigma
-    #         )
-    #         filtered_data.to_zarr(os.path.join(args.output_path, "filtered_mask.zarr"), overwrite=True)
-    #         filtered_data = da.from_zarr(os.path.join(args.output_path, "filtered_mask.zarr"))
+    filtered_data = check_and_load_zarr(args.output_path, "filtered_mask.zarr", chunk_size=chunk_size)
+    if filtered_data is None:
+        print("🔄 Applying Gaussian filter...")
+        with ProgressBar():
+            filtered_data = da.map_blocks(
+                process_filter_chunk,
+                mask_data, dtype=np.uint8, filter_sigma=args.filter_sigma
+            )
+            filtered_data.to_zarr(os.path.join(args.output_path, "filtered_mask.zarr"), overwrite=True)
+            filtered_data = da.from_zarr(os.path.join(args.output_path, "filtered_mask.zarr"))
 
     # Step 2: Skeletonization
     skeleton_data = check_and_load_zarr(args.output_path, "skeletonize_mask.zarr", chunk_size=chunk_size)
     if skeleton_data is None:
         print("🔄 Skeletonizing vessel mask...")
         with ProgressBar():
-            skeleton_data = da.map_overlap(
+            skeleton_data = da.map_blocks(
                 process_skeletonize_chunk,
-                mask_data, depth=2, dtype=np.uint16, boundary='reflect'
+                mask_data, dtype=np.uint8
             )
             skeleton_data.to_zarr(os.path.join(args.output_path, "skeletonize_mask.zarr"), overwrite=True)
             skeleton_data = da.from_zarr(os.path.join(args.output_path, "skeletonize_mask.zarr"))
@@ -206,11 +198,11 @@ def main():
     if distance_data is None:
         print("🔄 Calculating distance transform...")
         with ProgressBar():
-            distance_data = da.map_overlap(
+            distance_data = da.map_blocks(
                 process_distance_transform,
-                mask_data, depth=2, dtype=np.float32, boundary='reflect'
+                mask_data, dtype=np.float32
             )
-            distance_data.ZARR_OUT(os.path.join(args.output_path, "distance_mask.zarr"), overwrite=True)
+            distance_data.to_zarr(os.path.join(args.output_path, "distance_mask.zarr"), overwrite=True)
             distance_data = da.from_zarr(os.path.join(args.output_path, "distance_mask.zarr"))
 
     # Step 4: Feature Extraction

@@ -1,20 +1,16 @@
-# Dockerfile for zarr file based analyzer
-# Based on Python 3.10 slim image
+# Dockerfile for Zarr-Tiff Format Transform
 FROM python:3.10-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-# Install system dependencies
-RUN apt update && apt install -y \
-    clinfo \
+# Set up basic package
+RUN apt-get update && apt-get install -y \
+    build-essential \
     pocl-opencl-icd \
-    ocl-icd-opencl-dev \
-    ocl-icd-libopencl1
+    opencl-headers \
+    clinfo
 
 # Install Package dependencies
 COPY requirements.txt .
+RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Set working directory

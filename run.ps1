@@ -32,6 +32,15 @@ services:
     build:
       context: ./
       dockerfile: Dockerfile
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
     volumes:
       - "${HostDataPath}:${ContainerDataPath}"
       - "${HostUtilesPath}:${ContainerUtilesPath}"

@@ -1,10 +1,9 @@
 """
 Usage:
-python cell_analyzer.py 
-    <mask_path>             neun_mask_ome.zarr
-    <annotation_path>       annotation_ome.zarr
-    <output_path>           neun_output
-    --hemasphere_path       hemasphere_ome.zarr
+python cell_analyzer.py \
+    --mask_path             ./datas/neun_mask_ome.zarr/0 \
+    --annotation_path       ./datas/annotation_ome.zarr/0 \
+    --output_path           ./datas/neun_output \
     --chunk-size            128 128 128
 """
 
@@ -20,8 +19,6 @@ from dask.diagnostics.progress import ProgressBar
 
 from utils.analyzer_count_tools import numba_unique_cell
 from utils.analyzer_report_tools import create_cell_report
-
-# cle.select_device('GPU')
 
 def check_and_load_zarr(path, component=None, chunk_size=None):
     """ 
@@ -60,31 +57,26 @@ def process_filter_chunk(block, filter_size, filter_sigma):
     Returns:
         np.ndarray: The filtered and thresholded image block.
     """
+    block[block > 0] = 1
     gpu_mask = cle.push(block.astype(np.float32))
-    gpu_mask = cle.median_box(
-        source=gpu_mask,
-        radius_x=filter_size,
-        radius_y=filter_size,
-        radius_z=filter_size
-    )
+    # gpu_mask = cle.median_box(
+    #     source=gpu_mask,
+    #     radius_x=filter_size,
+    #     radius_y=filter_size,
+    #     radius_z=filter_size
+    # )
     gpu_mask = cle.gaussian_blur(
         source=gpu_mask,
         sigma_x=filter_sigma,
         sigma_y=filter_sigma,
         sigma_z=filter_sigma
     )
-    block = cle.pull(gpu_mask).astype(block.dtype)
-
-    # Determine max value based on dtype
-    if np.issubdtype(block.dtype, np.integer):
-        max_val = np.iinfo(block.dtype).max
-    else:
-        max_val = np.finfo(block.dtype).max
+    block = cle.pull(gpu_mask)
 
     # Apply threshold condition
-    block[block > 0.5] = max_val
+    block[block > 0.5] = 1
 
-    return block
+    return block.astype(np.uint8)
 
 def process_local_maxima_chunk(block):
     """
@@ -103,11 +95,12 @@ def process_local_maxima_chunk(block):
     Returns:
         np.ndarray: A binary 3D mask (dtype=uint16) where detected local maxima are set to 1.
     """
+    block[block > 0] = 1
     gpu_image = cle.push(block.astype(np.float32))
     gpu_blurred = cle.gaussian_blur(gpu_image, sigma_x=1, sigma_y=1, sigma_z=1)
-    gpu_maxima = cle.detect_maxima_box(gpu_blurred, radius_x= 3, radius_y= 3, radius_z= 3)
-    local_maxima = cle.pull(gpu_maxima).astype(np.uint16)
-
+    gpu_maxima = cle.detect_maxima_box(gpu_blurred, radius_x=5, radius_y=5, radius_z=3)
+    local_maxima = cle.pull(gpu_maxima).astype(np.uint8)
+    
     local_maxima[(local_maxima > 0) & (block > 0)] = 1
 
     return local_maxima
@@ -163,9 +156,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Apply median filter to a Zarr file using Dask with map_overlap."
     )
-    parser.add_argument("mask_path", type=str, help="Zarr path to cell mask to be filtered.")
-    parser.add_argument("annotation_path", type=str, help="Zarr path to annotation")
-    parser.add_argument("output_path", type=str, help="Output path for temporary zarr and final report")
+    parser.add_argument("--mask_path", type=str, required=True, help="Zarr path to cell mask to be filtered.")
+    parser.add_argument("--annotation_path", type=str, required=True, help="Zarr path to annotation")
+    parser.add_argument("--output_path", type=str, required=True, help="Output path for temporary zarr and final report")
     parser.add_argument("--hemasphere_path", type=str, default=None, 
                         help="Zarr path to hemisphere segmentation.")
     parser.add_argument("--voxel", type=float, nargs='+', default=(0.004, 0.00182, 0.00182),
@@ -174,8 +167,8 @@ def main():
                         help="Optional: Override chunk size for Dask processing (space-separated)")
     parser.add_argument("--filter-size", type=int, default=3,
                         help="Size of the median filter kernel (default: 3)")
-    parser.add_argument("--filter-sigma", type=float, default=0.3,
-                        help="Sigma of the gaussian filter (default: 0.3)")
+    parser.add_argument("--filter-sigma", type=float, default=2,
+                        help="Sigma of the gaussian filter (default: 2)")
 
     args = parser.parse_args()
     chunk_size = tuple(args.chunk_size) if args.chunk_size else None
@@ -189,19 +182,20 @@ def main():
     print(f"Mask shape: {mask_data.shape}") # type: ignore
     print(f"Annotation shape: {anno_data.shape}") # type: ignore
 
-    # # **Step 1: Apply Filtering (Skip if Exists)**
-    # filtered_data = check_and_load_zarr(args.output_path, "filtered_mask.zarr", chunk_size=chunk_size)
-    # if filtered_data is None:
-    #     with ProgressBar():
-    #         print("🔄 Applying filtering...")
-    #         filtered_data = da.map_blocks(
-    #             process_filter_chunk,
-    #             mask_data,
-    #             filter_size=args.filter_size,
-    #             filter_sigma=args.filter_sigma,
-    #         )
-    #         filtered_data.to_zarr(os.path.join(args.output_path, "filtered_mask.zarr"), overwrite=True)
-    #         filtered_data = da.from_zarr(os.path.join(args.output_path, "filtered_mask.zarr"))
+    # **Step 1: Apply Filtering (Skip if Exists)**
+    filtered_data = check_and_load_zarr(args.output_path, "filtered_mask.zarr", chunk_size=chunk_size)
+    if filtered_data is None:
+        with ProgressBar():
+            print("🔄 Applying filtering...")
+            filtered_data = da.map_blocks(
+                process_filter_chunk,
+                mask_data,
+                dtype=np.uint8,
+                filter_size=args.filter_size,
+                filter_sigma=args.filter_sigma,
+            )
+            filtered_data.to_zarr(os.path.join(args.output_path, "filtered_mask.zarr"), overwrite=True)
+            filtered_data = da.from_zarr(os.path.join(args.output_path, "filtered_mask.zarr"))
 
     # **Step 2: Compute Local Maxima (Skip if Exists)**
     maxima_data = check_and_load_zarr(args.output_path, "maxima_mask.zarr", chunk_size=chunk_size)
@@ -210,8 +204,8 @@ def main():
             print("🔄 Finding local maxima...")
             maxima_data = da.map_blocks(
                 process_local_maxima_chunk,
-                mask_data,
-                dtype=np.uint16,
+                filtered_data,
+                dtype=np.uint8,
             )
             maxima_data.to_zarr(os.path.join(args.output_path, "maxima_mask.zarr"), overwrite=True)
             maxima_data = da.from_zarr(os.path.join(args.output_path, "maxima_mask.zarr"))
