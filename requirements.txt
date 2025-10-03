@@ -1,7 +1,7 @@
 zarr
-dask
+dask[distributed]
+bokeh
 tqdm
-pyclesperanto_prototype
 scikit-image
 scipy
 numba

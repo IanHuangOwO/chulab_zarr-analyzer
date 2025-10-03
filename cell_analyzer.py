@@ -12,9 +12,9 @@ import os
 import argparse
 import numpy as np
 from scipy import ndimage as ndi
-import dask.array as da
-
 from tqdm import tqdm
+import json
+import dask.array as da
 from dask.diagnostics.progress import ProgressBar
 from dask.distributed import Client, LocalCluster
 
@@ -48,14 +48,13 @@ def check_and_load_zarr(path, component=None, chunk_size=None):
     return None
 
 
-def process_filter_chunk(block, filter_size, filter_sigma):
+def process_filter_chunk(block, filter_size):
     """
     Applies a median filter followed by a Gaussian blur to a 3D image block on the CPU.
 
     Parameters:
         block (np.ndarray): The 3D image chunk to process.
         filter_size (int): The radius for the median filter in all dimensions.
-        filter_sigma (float): The sigma value for the Gaussian blur.
 
     Returns:
         np.ndarray: The filtered and thresholded image block.
@@ -71,14 +70,8 @@ def process_filter_chunk(block, filter_size, filter_sigma):
         size=filter_diameter
     )
 
-    # 3. Apply a Gaussian blur using scipy.ndimage.
-    gaussian_filtered = ndi.gaussian_blur(
-        input=median_filtered,
-        sigma=filter_sigma
-    )
-
-    # 4. Apply the final threshold condition to get a binary mask.
-    final_mask = (gaussian_filtered > 0.5).astype(np.uint8)
+    # 3. Apply the final threshold condition to get a binary mask.
+    final_mask = (median_filtered > 0.5).astype(np.uint8)
     
     return final_mask
 
@@ -110,7 +103,7 @@ def process_local_maxima_chunk(block):
     # A pixel is a local maximum if it equals the maximum value in its neighborhood.
     # Note: size = 2 * radius + 1. The original code used radius (x=5, y=5, z=3).
     # We assume a (Z, Y, X) axis order for the size.
-    footprint_size = (7, 11, 11) # For radius_z=3, radius_y=5, radius_x=5
+    footprint_size = (3, 3, 3) # For radius_z=3, radius_y=5, radius_x=5
     maxima_mask = (blurred_block == ndi.maximum_filter(blurred_block, size=footprint_size))
 
     # Ensure the final maxima are located within the original foreground region.
@@ -119,9 +112,25 @@ def process_local_maxima_chunk(block):
     # Return the binary mask, converting the boolean to uint8.
     return final_maxima.astype(np.uint8)
 
-def process_calculation_chunk(anno_chunk, hema_chunk, mask_chunk):
-    """Extract unique nonzero values and their counts per block."""
-    return dict(numba_unique_cell(anno_chunk, hema_chunk, mask_chunk))
+def process_calculation_chunk(anno, hema, mask):
+    """Extract unique nonzero values and their counts per chunk."""
+    # Convert Numba typed dict to a standard Python dict for serialization
+    result = numba_unique_cell(anno, hema, mask)
+    return {k: v.tolist() for k, v in result.items()}
+
+def _aggregate_signals(result_dict, full_brain, left_brain, right_brain):
+    """Helper to aggregate counts from a slab into the main dictionaries."""
+    for value_str, nums in result_dict.items():
+        value = int(value_str)
+        # Full brain
+        if value not in full_brain: full_brain[value] = nums[:2]
+        else: full_brain[value] = [x + y for x, y in zip(full_brain[value], nums[:2])]
+        # Left brain
+        if value not in left_brain: left_brain[value] = nums[2:4]
+        else: left_brain[value] = [x + y for x, y in zip(left_brain[value], nums[2:4])]
+        # Right brain
+        if value not in right_brain: right_brain[value] = nums[4:6]
+        else: right_brain[value] = [x + y for x, y in zip(right_brain[value], nums[4:6])]
 
 def process_analysis_report(region_signals, voxel, output_name, output_path):
     """
@@ -181,15 +190,18 @@ def main():
                         help="Optional: Override chunk size for Dask processing (space-separated)")
     parser.add_argument("--filter-size", type=int, default=3,
                         help="Size of the median filter kernel (default: 3)")
-    parser.add_argument("--filter-sigma", type=float, default=2,
-                        help="Sigma of the gaussian filter (default: 2)")
+    parser.add_argument("--z-per-slab", type=int, default=128,
+                        help="Number of Z-slices to process per slab (default: 128). Adjust based on memory.")
+    parser.add_argument("--n-workers", type=int, default=8,
+                        help="Number of Dask worker processes to start (default: 8).")
+    parser.add_argument("--memory-limit", type=str, default='32GB',
+                        help="Memory limit per Dask worker (e.g., '16GB', '256GB') (default: '32GB').")
 
     args = parser.parse_args()
     chunk_size = tuple(args.chunk_size) if args.chunk_size else None
     cluster = LocalCluster(
-        n_workers=8,               # Number of worker processes to start
-        threads_per_worker=2,      # Number of threads per worker
-        memory_limit='8GB'         # The memory limit for each worker
+        n_workers=args.n_workers,
+        memory_limit=args.memory_limit
     )
 
     client = Client(cluster)
@@ -214,7 +226,6 @@ def main():
     #             mask_data,
     #             dtype=np.uint8,
     #             filter_size=args.filter_size,
-    #             filter_sigma=args.filter_sigma,
     #         )
     #         filtered_data.to_zarr(os.path.join(args.output_path, "filtered_mask.zarr"), overwrite=True)
     #         filtered_data = da.from_zarr(os.path.join(args.output_path, "filtered_mask.zarr"))
@@ -238,44 +249,37 @@ def main():
     full_brain_signal = {}
     left_brain_signal = {}
     right_brain_signal = {}
-    z_per_process = 16
-    img_dimension = mask_data.shape # type: ignore
+    
+    checkpoint_path = os.path.join(args.output_path, "cell_counts.json")
+    if os.path.exists(checkpoint_path):
+        print(f"✅ Found checkpoint file, loading from: {checkpoint_path}")
+        # Load from checkpoint and aggregate directly
+        with open(checkpoint_path, 'r') as f:
+            for line in f:
+                result_dict = json.loads(line)
+                _aggregate_signals(result_dict, full_brain_signal, left_brain_signal, right_brain_signal)
+    else:
+        print("🔄 Processing unique values and counts...")
+        z_per_slab = args.z_per_slab
+        img_dimension = mask_data.shape
 
-    print("🔄 Processing unique values and counts...")
-    for i in tqdm(range(0, img_dimension[0], z_per_process)):
-        start_i, end_i = i, min(i + z_per_process, img_dimension[0])
+        with open(checkpoint_path, 'w') as f_checkpoint:
+            for i in tqdm(range(0, img_dimension[0], z_per_slab)):
+                start_z, end_z = i, min(i + z_per_slab, img_dimension[0])
+                
+                anno_slab = anno_data[start_z:end_z].compute()
+                maxima_slab = maxima_data[start_z:end_z].compute()
+                hema_slab = hema_data[start_z:end_z].compute() if hema_data is not None else np.zeros_like(anno_slab)
 
-        if hema_data is None:
-            anno_chunk, maxima_chunk,  = da.compute(
-                anno_data[start_i:end_i], # type: ignore
-                maxima_data[start_i:end_i],
-            )
-            hema_chunk = np.zeros_like(anno_chunk)
+                # Process the slab and get the dictionary of counts
+                result_dict = process_calculation_chunk(anno_slab, hema_slab, maxima_slab)
 
-        else:
-            anno_chunk, hema_chunk, maxima_chunk = da.compute(
-                anno_data[start_i:end_i], # type: ignore
-                hema_data[start_i:end_i],
-                maxima_data[start_i:end_i],
-            )
+                # Write to checkpoint immediately
+                f_checkpoint.write(json.dumps(result_dict) + '\n')
 
-        result = process_calculation_chunk(anno_chunk, hema_chunk, maxima_chunk)
+                # Aggregate results in memory
+                _aggregate_signals(result_dict, full_brain_signal, left_brain_signal, right_brain_signal)
 
-        for value, nums in result.items():
-            if value not in full_brain_signal:
-                full_brain_signal[value] = nums[:2]
-            else:
-                full_brain_signal[value] += nums[:2]
-
-            if value not in left_brain_signal:
-                left_brain_signal[value] = nums[2:4]
-            else:
-                left_brain_signal[value] += nums[2:4]
-
-            if value not in right_brain_signal:
-                right_brain_signal[value] = nums[4:6]
-            else:
-                right_brain_signal[value] += nums[4:6]
 
     # **Step 4: Save Results as a CSV Report**
     print("📄 Generating final report...")
