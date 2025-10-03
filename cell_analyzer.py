@@ -11,14 +11,16 @@ import time
 import os
 import argparse
 import numpy as np
-import pyclesperanto_prototype as cle
+from scipy import ndimage as ndi
 import dask.array as da
 
 from tqdm import tqdm
 from dask.diagnostics.progress import ProgressBar
+from dask.distributed import Client, LocalCluster
 
 from utils.analyzer_count_tools import numba_unique_cell
 from utils.analyzer_report_tools import create_cell_report
+
 
 def check_and_load_zarr(path, component=None, chunk_size=None):
     """ 
@@ -45,65 +47,77 @@ def check_and_load_zarr(path, component=None, chunk_size=None):
 
     return None
 
+
 def process_filter_chunk(block, filter_size, filter_sigma):
     """
-    Applies a median box filter followed by a Gaussian blur to a 3D image block on the GPU.
+    Applies a median filter followed by a Gaussian blur to a 3D image block on the CPU.
 
     Parameters:
         block (np.ndarray): The 3D image chunk to process.
-        filter_size (int): The radius for the median box filter in all dimensions.
+        filter_size (int): The radius for the median filter in all dimensions.
         filter_sigma (float): The sigma value for the Gaussian blur.
 
     Returns:
         np.ndarray: The filtered and thresholded image block.
     """
-    block[block > 0] = 1
-    gpu_mask = cle.push(block.astype(np.float32))
-    # gpu_mask = cle.median_box(
-    #     source=gpu_mask,
-    #     radius_x=filter_size,
-    #     radius_y=filter_size,
-    #     radius_z=filter_size
-    # )
-    gpu_mask = cle.gaussian_blur(
-        source=gpu_mask,
-        sigma_x=filter_sigma,
-        sigma_y=filter_sigma,
-        sigma_z=filter_sigma
+    # 1. Binarize the input block to work with a mask.
+    binary_block = (block > 0).astype(np.float32)
+
+    # 2. Apply a median filter using scipy.ndimage.
+    # Note: size = 2 * radius + 1. The original code used a radius.
+    filter_diameter = 2 * filter_size + 1
+    median_filtered = ndi.median_filter(
+        input=binary_block,
+        size=filter_diameter
     )
-    block = cle.pull(gpu_mask)
 
-    # Apply threshold condition
-    block[block > 0.5] = 1
+    # 3. Apply a Gaussian blur using scipy.ndimage.
+    gaussian_filtered = ndi.gaussian_blur(
+        input=median_filtered,
+        sigma=filter_sigma
+    )
 
-    return block.astype(np.uint8)
+    # 4. Apply the final threshold condition to get a binary mask.
+    final_mask = (gaussian_filtered > 0.5).astype(np.uint8)
+    
+    return final_mask
+
 
 def process_local_maxima_chunk(block):
     """
-    Detects local maxima in a 3D image block using Gaussian blur and a box-based maxima filter.
+    Detects local maxima in a 3D image block using SciPy and NumPy.
 
     The function performs the following steps:
-    1. Converts the input block to float32 and pushes it to the GPU.
-    2. Applies a Gaussian blur to reduce noise.
-    3. Detects local maxima using a box filter with a fixed radius.
-    4. Pulls the result back to CPU and converts it to uint16.
-    5. Retains only the maxima that correspond to positive values in the original block.
+    1. Creates a binary copy of the input block to work with.
+    2. Applies a Gaussian blur using scipy.ndimage to reduce noise.
+    3. Detects local maxima by comparing the blurred block to its maximum-filtered version.
+    4. Retains only the maxima that correspond to positive values in the original block.
 
     Parameters:
         block (np.ndarray): The 3D image block to process.
 
     Returns:
-        np.ndarray: A binary 3D mask (dtype=uint16) where detected local maxima are set to 1.
+        np.ndarray: A binary 3D mask (dtype=uint8) where detected local maxima are set to 1.
     """
-    block[block > 0] = 1
-    gpu_image = cle.push(block.astype(np.float32))
-    gpu_blurred = cle.gaussian_blur(gpu_image, sigma_x=1, sigma_y=1, sigma_z=1)
-    gpu_maxima = cle.detect_maxima_box(gpu_blurred, radius_x=5, radius_y=5, radius_z=3)
-    local_maxima = cle.pull(gpu_maxima).astype(np.uint8)
-    
-    local_maxima[(local_maxima > 0) & (block > 0)] = 1
+    # Create a binary version of the block to match the original function's logic.
+    # This also prevents modifying the input array in-place.
+    binary_block = (block > 0).astype(np.uint8)
 
-    return local_maxima
+    # Apply a Gaussian blur. SciPy needs a float input for this.
+    blurred_block = ndi.gaussian_filter(binary_block.astype(np.float32), sigma=(1, 1, 1))
+
+    # Detect local maxima using a maximum filter.
+    # A pixel is a local maximum if it equals the maximum value in its neighborhood.
+    # Note: size = 2 * radius + 1. The original code used radius (x=5, y=5, z=3).
+    # We assume a (Z, Y, X) axis order for the size.
+    footprint_size = (7, 11, 11) # For radius_z=3, radius_y=5, radius_x=5
+    maxima_mask = (blurred_block == ndi.maximum_filter(blurred_block, size=footprint_size))
+
+    # Ensure the final maxima are located within the original foreground region.
+    final_maxima = maxima_mask & (binary_block > 0)
+    
+    # Return the binary mask, converting the boolean to uint8.
+    return final_maxima.astype(np.uint8)
 
 def process_calculation_chunk(anno_chunk, hema_chunk, mask_chunk):
     """Extract unique nonzero values and their counts per block."""
@@ -172,6 +186,14 @@ def main():
 
     args = parser.parse_args()
     chunk_size = tuple(args.chunk_size) if args.chunk_size else None
+    cluster = LocalCluster(
+        n_workers=8,               # Number of worker processes to start
+        threads_per_worker=2,      # Number of threads per worker
+        memory_limit='8GB'         # The memory limit for each worker
+    )
+
+    client = Client(cluster)
+    print(f"Dashboard link: {client.dashboard_link}")
 
     start_time = time.time()
     # Load Zarr arrays
@@ -182,29 +204,31 @@ def main():
     print(f"Mask shape: {mask_data.shape}") # type: ignore
     print(f"Annotation shape: {anno_data.shape}") # type: ignore
 
-    # **Step 1: Apply Filtering (Skip if Exists)**
-    filtered_data = check_and_load_zarr(args.output_path, "filtered_mask.zarr", chunk_size=chunk_size)
-    if filtered_data is None:
-        with ProgressBar():
-            print("🔄 Applying filtering...")
-            filtered_data = da.map_blocks(
-                process_filter_chunk,
-                mask_data,
-                dtype=np.uint8,
-                filter_size=args.filter_size,
-                filter_sigma=args.filter_sigma,
-            )
-            filtered_data.to_zarr(os.path.join(args.output_path, "filtered_mask.zarr"), overwrite=True)
-            filtered_data = da.from_zarr(os.path.join(args.output_path, "filtered_mask.zarr"))
+    # # **Step 1: Apply Filtering (Skip if Exists)**
+    # filtered_data = check_and_load_zarr(args.output_path, "filtered_mask.zarr", chunk_size=chunk_size)
+    # if filtered_data is None:
+    #     with ProgressBar():
+    #         print("🔄 Applying filtering...")
+    #         filtered_data = da.map_blocks(
+    #             process_filter_chunk,
+    #             mask_data,
+    #             dtype=np.uint8,
+    #             filter_size=args.filter_size,
+    #             filter_sigma=args.filter_sigma,
+    #         )
+    #         filtered_data.to_zarr(os.path.join(args.output_path, "filtered_mask.zarr"), overwrite=True)
+    #         filtered_data = da.from_zarr(os.path.join(args.output_path, "filtered_mask.zarr"))
 
     # **Step 2: Compute Local Maxima (Skip if Exists)**
     maxima_data = check_and_load_zarr(args.output_path, "maxima_mask.zarr", chunk_size=chunk_size)
     if maxima_data is None:
         with ProgressBar():
             print("🔄 Finding local maxima...")
-            maxima_data = da.map_blocks(
+            maxima_data = da.map_overlap(
                 process_local_maxima_chunk,
-                filtered_data,
+                mask_data,
+                trim=True,
+                depth=8,
                 dtype=np.uint8,
             )
             maxima_data.to_zarr(os.path.join(args.output_path, "maxima_mask.zarr"), overwrite=True)
