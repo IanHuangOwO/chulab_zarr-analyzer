@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from IO import FileReader
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s"
@@ -145,7 +147,7 @@ def main():
     # --- Group 2: Conversion Control ---
     conv_group = parser.add_argument_group('Conversion Control')
     conv_group.add_argument("--conversion_output_path", type=str, default="./converted_data", help="Directory to store intermediate Zarr files.")
-    conv_group.add_argument("--conversion_output_type", type=str, default="OME-Zarr", choices=["OME-Zarr", "Zarr"], help="Output format for conversion.")
+    conv_group.add_argument("--conversion_output_type", type=str, default="Zarr", choices=["OME-Zarr", "Zarr"], help="Output format for conversion.")
     conv_group.add_argument("--force-conversion", action="store_true", help="Force reconversion even if Zarr files exist.")
     conv_group.add_argument("--resize-shape", type=int, nargs=3, metavar=("Z", "Y", "X"), help="Target shape for resizing during conversion.")
     conv_group.add_argument("--resize-order", type=int, default=0, help="Interpolation order for resizing (0=nearest, 1=linear).")
@@ -169,17 +171,36 @@ def main():
     
     args, unknown_args = parser.parse_known_args()
 
-    logging.info("--- Step 1: Ensuring all inputs are in Zarr format ---")
+    logging.info("--- Step 1: Determining target shape and ensuring inputs are Zarr ---")
 
+    # --- Determine target shape for alignment ---
+    # If a resize_shape is given, all inputs will be resized to it.
+    # If not, we read the mask's shape and use that to align the other inputs.
+    alignment_shape = args.resize_shape
+    if not alignment_shape:
+        logging.info("No --resize-shape provided. Reading shape from mask_path for alignment.")
+        try:
+            reader = FileReader(args.mask_path)
+            alignment_shape = list(reader.volume_shape)
+            logging.info(f"Mask shape is {alignment_shape}. Annotations will be resized to match.")
+        except Exception as e:
+            logging.error(f"Could not read shape from mask_path '{args.mask_path}'. Error: {e}")
+            raise
+
+    # --- Ensure all inputs are converted to Zarr format ---
     conversion_dir = Path(args.conversion_output_path)
 
-    # Convert each input path and get the path to the resulting Zarr store
+    # Convert mask: Use the user's --resize-shape if provided. If not, args.resize_shape is None,
+    # and the mask's original shape is preserved.
     zarr_mask_path = ensure_zarr(args.mask_path, conversion_dir, args.conversion_output_type, args.resize_shape, args.resize_order, args.chunk_size, args, args.force_conversion)
-    zarr_anno_path = ensure_zarr(args.annotation_path, conversion_dir, args.conversion_output_type, args.resize_shape, args.resize_order, args.chunk_size, args, args.force_conversion)
 
+    # Convert annotation: Always resize to match the alignment_shape. Use nearest-neighbor (order=0) to preserve labels.
+    zarr_anno_path = ensure_zarr(args.annotation_path, conversion_dir, args.conversion_output_type, alignment_shape, 0, args.chunk_size, args, args.force_conversion)
+
+    # Convert hemisphere if provided, also resizing to the alignment_shape with nearest-neighbor.
     zarr_hema_path = None
     if args.hemasphere_path:
-        zarr_hema_path = ensure_zarr(args.hemasphere_path, conversion_dir, args.conversion_output_type, args.resize_shape, args.resize_order, args.chunk_size, args, args.force_conversion)
+        zarr_hema_path = ensure_zarr(args.hemasphere_path, conversion_dir, args.conversion_output_type, alignment_shape, 0, args.chunk_size, args, args.force_conversion)
 
     logging.info("--- All inputs are ready in Zarr format. ---")
     logging.info(f"Mask Zarr: {zarr_mask_path}")
