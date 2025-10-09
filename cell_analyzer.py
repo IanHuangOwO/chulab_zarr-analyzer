@@ -109,8 +109,33 @@ def process_local_maxima_chunk(block):
     # Ensure the final maxima are located within the original foreground region.
     final_maxima = maxima_mask & (binary_block > 0)
     
-    # Return the binary mask, converting the boolean to uint8.
-    return final_maxima.astype(np.uint8)
+    # 1. Create the 'labels' array.
+    labels, num_labels = ndi.label(final_maxima)
+
+    # 2. If no objects are found, return a blank block of the correct type.
+    if num_labels == 0:
+        # We can reuse 'labels' here too.
+        labels[:] = 0
+        return labels.astype(np.uint8)
+
+    # 3. Calculate the centroids. After this line, 'final_maxima' is no longer needed.
+    mass_centers = ndi.center_of_mass(final_maxima, labels, range(1, num_labels + 1))
+
+    # Explicitly delete the reference to free up memory sooner (optional but good practice).
+    del final_maxima
+
+    # --- MEMORY OPTIMIZATION ---
+    # Instead of creating a new np.zeros_like() array, we re-purpose the 'labels' array.
+
+    # 4. First, set all values in the existing 'labels' array to 0. This is an in-place operation.
+    labels[:] = 0
+
+    # 5. Now, use this cleared array to mark the center points.
+    for z, y, x in mass_centers:
+        labels[int(round(z)), int(round(y)), int(round(x))] = 1
+
+    # 6. Return the re-purposed array, converting it to the final desired data type.
+    return labels.astype(np.uint8)
 
 def process_calculation_chunk(anno, hema, mask):
     """Extract unique nonzero values and their counts per chunk."""
@@ -204,8 +229,8 @@ def main():
         memory_limit=args.memory_limit
     )
 
-    client = Client(cluster)
-    print(f"Dashboard link: {client.dashboard_link}")
+    # client = Client(cluster)
+    # print(f"Dashboard link: {client.dashboard_link}")
 
     start_time = time.time()
     # Load Zarr arrays
