@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .env
 .devcontainer/
+.ds_store
