@@ -12,13 +12,12 @@ import os
 import argparse
 import numpy as np
 import dask.array as da
-import pyclesperanto_prototype as cle
 
 from tqdm import tqdm
 from dask.diagnostics.progress import ProgressBar
 from skimage.morphology import skeletonize
 from skimage.measure import regionprops
-from scipy.ndimage import convolve, label, distance_transform_edt
+from scipy.ndimage import convolve, label, distance_transform_edt, median_filter
 
 from utils.analyzer_count_tools import numba_unique_vessel
 from utils.analyzer_report_tools import create_vessel_report
@@ -44,19 +43,32 @@ def check_and_load_zarr(path, component=None, chunk_size=None):
         return da.from_zarr(full_path, chunks=chunk_size) if chunk_size else da.from_zarr(full_path)
     return None
 
-def process_filter_chunk(block, filter_sigma):
-    """Apply Gaussian filter to a chunk using GPU (pyclesperanto)."""
-    block[block > 0] = 1
-    gpu_mask = cle.push(block.astype(np.float32))
-    gpu_mask = cle.gaussian_blur(
-        source=gpu_mask,
-        sigma_x=filter_sigma,
-        sigma_y=filter_sigma,
-        sigma_z=filter_sigma
+def process_filter_chunk(block, filter_size):
+    """
+    Applies a median filter followed by a Gaussian blur to a 3D image block on the CPU.
+
+    Parameters:
+        block (np.ndarray): The 3D image chunk to process.
+        filter_size (int): The radius for the median filter in all dimensions.
+
+    Returns:
+        np.ndarray: The filtered and thresholded image block.
+    """
+    # 1. Binarize the input block to work with a mask.
+    binary_block = (block > 0).astype(np.float32)
+
+    # 2. Apply a median filter using scipy.ndimage.
+    # Note: size = 2 * radius + 1. The original code used a radius.
+    filter_diameter = 2 * filter_size + 1
+    median_filtered = median_filter(
+        input=binary_block,
+        size=filter_diameter
     )
-    gpu_mask = cle.pull(gpu_mask)
-    block[gpu_mask > 0.5] = 1
-    return block.astype(np.uint8)
+
+    # 3. Apply the final threshold condition to get a binary mask.
+    final_mask = (median_filtered > 0.5).astype(np.uint8)
+    
+    return final_mask
 
 def process_skeletonize_chunk(block):
     """Skeletonize a binary 3D block and mark bifurcation points."""
