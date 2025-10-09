@@ -70,6 +70,8 @@ def parse_args():
     # Memory limit
     parser.add_argument("--memory-limit", type=int, default=64,
                         help="Maximum memory (in GB) for temp buffers")
+    parser.add_argument("--n-workers", type=int, default=8,
+                        help="Number of worker processes for parallel resizing tasks.")
 
     return parser.parse_args()
 
@@ -99,6 +101,7 @@ def _write_pyramid(reader: FileReader, args, full_res_shape, chunk_tuple, io_out
         resize_factor=args.downscale_factor,
         resize_order=args.resize_order,
         input_shape=tuple(reader.volume_shape),
+        n_workers=args.n_workers,
     )
 
     z_max = reader.volume_shape[0]

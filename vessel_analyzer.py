@@ -166,11 +166,19 @@ def main():
                         help="For final volume calculation. (default: 0.004, 0.00182, 0.00182)")
     parser.add_argument("--chunk-size", type=int, nargs='+', default=None, 
                         help="Optional: Override chunk size for Dask processing (space-separated)")
-    parser.add_argument("--filter-sigma", type=float, default=2, 
+    parser.add_argument("--filter-sigma", type=float, default=2,
                         help="Sigma of the gaussian filter (default: 0.3)")
+    parser.add_argument("--z-per-slab", type=int, default=16,
+                        help="Number of Z-slices to process per slab (default: 16). Adjust based on memory.")
+    parser.add_argument("--n-workers", type=int, default=8,
+                        help="Number of Dask worker processes to start (default: 8).")
+    parser.add_argument("--memory-limit", type=str, default='32GB',
+                        help="Memory limit per Dask worker (e.g., '16GB', '256GB') (default: '32GB').")
 
     args = parser.parse_args()
     chunk_size = tuple(args.chunk_size) if args.chunk_size else None
+
+    # Note: Dask cluster setup is parsed but not yet fully integrated.
 
     start_time = time.time()
     # Load datasets
@@ -222,11 +230,10 @@ def main():
     full_brain_signal = {}
     left_brain_signal = {}
     right_brain_signal = {}
-    z_per_process = 16
     img_dimension = mask_data.shape # type: ignore
 
-    for i in tqdm(range(0, img_dimension[0], z_per_process)):
-        start_i, end_i = i, min(i + z_per_process, img_dimension[0])
+    for i in tqdm(range(0, img_dimension[0], args.z_per_slab)):
+        start_i, end_i = i, min(i + args.z_per_slab, img_dimension[0])
         if hema_data is None:
             anno_chunk, mask_chunk, skel_chunk, dist_chunk = da.compute(
                 anno_data[start_i:end_i], # type: ignore
