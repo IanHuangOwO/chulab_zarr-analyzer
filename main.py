@@ -27,6 +27,7 @@ def ensure_zarr(
     resize_shape: list[int] | None,
     resize_order: int,
     chunk_size: int,
+    converter_args: argparse.Namespace,
     force_conversion: bool = False
 ) -> Path:
     """
@@ -39,6 +40,7 @@ def ensure_zarr(
         resize_shape: The target shape (Z, Y, X) for resizing during conversion.
         resize_order: The interpolation order for resizing (0=nearest, 1=linear, etc.).
         chunk_size: The chunk size to use for the Zarr output.
+        converter_args: Additional arguments to pass to the converter script.
         force_conversion: If True, runs conversion even if a Zarr file already exists.
 
     Returns:
@@ -90,9 +92,22 @@ def ensure_zarr(
         # resize-order is only relevant if resize-shape is also provided.
         command.extend(["--resize-order", str(resize_order)])
 
-    # Pass n_workers to the converter script if it's provided via the main script
-    if '--n-workers' in ' '.join(sys.argv):
-        command.extend(["--n-workers", str(next(arg for i, arg in enumerate(sys.argv) if sys.argv[i-1] == '--n-workers'))])
+    # Pass through additional converter-specific arguments
+    if converter_args.transpose:
+        command.extend(["--transpose", *(str(s) for s in converter_args.transpose)])
+    if converter_args.downscale_factor is not None:
+        command.extend(["--downscale-factor", str(converter_args.downscale_factor)])
+    if converter_args.levels is not None:
+        command.extend(["--levels", str(converter_args.levels)])
+    if converter_args.scroll_axis is not None:
+        command.extend(["--scroll-axis", str(converter_args.scroll_axis)])
+    
+    # Pass performance args to converter
+    if converter_args.n_workers is not None:
+        command.extend(["--n-workers", str(converter_args.n_workers)])
+    # The converter's memory limit is in GB (int), not a string like the analyzer's
+    if converter_args.memory_limit is not None:
+        command.extend(["--memory-limit", str(int(converter_args.memory_limit.removesuffix('GB')))])
 
     try:
         # Using sys.executable ensures we use the python from the correct environment (e.g., inside Docker)
@@ -117,58 +132,54 @@ def main():
         description="Main entry point for Zarr analysis pipeline.",
         formatter_class=argparse.RawTextHelpFormatter
     )
-    # --- Core Arguments ---
-    parser.add_argument(
-        "--analyzer_type",
-        type=str,
-        required=True,
-        choices=["cell", "vessel"],
-        help="The type of analysis to perform ('cell' or 'vessel')."
-    )
-    parser.add_argument("--mask_path", type=str, required=True, help="Path to the primary mask file (e.g., cell or vessel mask).")
-    parser.add_argument("--annotation_path", type=str, required=True, help="Path to the brain annotation file.")
-    parser.add_argument("--hemasphere_path", type=str, help="Optional: Path to the hemisphere segmentation file.")
-    parser.add_argument("--output_path", type=str, required=True, help="Directory to save the final analysis reports.")
-
-    # --- Conversion Control ---
-    parser.add_argument("--conversion_output_path", type=str, default="./converted_data", help="Directory to store intermediate Zarr files.")
-    parser.add_argument(
-        "--conversion_output_type",
-        type=str,
-        default="OME-Zarr",
-        choices=["OME-Zarr", "Zarr"],
-        help="Output format for conversion. Defaults to OME-Zarr."
-    )
-    parser.add_argument("--resize-shape", type=int, nargs=3, metavar=("Z", "Y", "X"), help="Target shape for resizing during conversion.")
-    parser.add_argument("--resize-order", type=int, default=0, help="Interpolation order for resizing (e.g., 0 for nearest, 1 for linear).")
-    parser.add_argument("--chunk-size", type=int, default=128, help="Chunk size for creating Zarr files.")
-    parser.add_argument("--force-conversion", action="store_true", help="Force reconversion even if Zarr files exist.")
-
     
-    # --- Analysis Performance ---
-    # These arguments are passed through to the selected analyzer script.
-    # We define them here for a unified CLI and for --help documentation.
-    perf_group = parser.add_argument_group('Analysis Performance Control')
+    # --- Group 1: Core Arguments ---
+    core_group = parser.add_argument_group('Core Arguments')
+    core_group.add_argument("--analyzer_type", type=str, required=True, choices=["cell", "vessel"], help="The type of analysis to perform.")
+    core_group.add_argument("--mask_path", type=str, required=True, help="Path to the primary mask file (e.g., cell or vessel mask).")
+    core_group.add_argument("--annotation_path", type=str, required=True, help="Path to the brain annotation file.")
+    core_group.add_argument("--hemasphere_path", type=str, help="Optional: Path to the hemisphere segmentation file.")
+    core_group.add_argument("--output_path", type=str, required=True, help="Directory to save the final analysis reports.")
+    core_group.add_argument("--voxel", type=float, nargs=3, metavar=("Z", "Y", "X"), help="Voxel size for volume calculation (e.g., 0.004 0.00182 0.00182).")
+
+    # --- Group 2: Conversion Control ---
+    conv_group = parser.add_argument_group('Conversion Control')
+    conv_group.add_argument("--conversion_output_path", type=str, default="./converted_data", help="Directory to store intermediate Zarr files.")
+    conv_group.add_argument("--conversion_output_type", type=str, default="OME-Zarr", choices=["OME-Zarr", "Zarr"], help="Output format for conversion.")
+    conv_group.add_argument("--force-conversion", action="store_true", help="Force reconversion even if Zarr files exist.")
+    conv_group.add_argument("--resize-shape", type=int, nargs=3, metavar=("Z", "Y", "X"), help="Target shape for resizing during conversion.")
+    conv_group.add_argument("--resize-order", type=int, default=0, help="Interpolation order for resizing (0=nearest, 1=linear).")
+    conv_group.add_argument("--chunk-size", type=int, default=128, help="Chunk size for creating Zarr files during conversion.")
+    conv_group.add_argument("--transpose", type=int, nargs=3, metavar=("AXIS0", "AXIS1", "AXIS2"), help="Axis order to apply during conversion (e.g., 1 0 2).")
+    conv_group.add_argument("--downscale-factor", type=int, help="Downsampling factor per pyramid level for OME-Zarr.")
+    conv_group.add_argument("--levels", type=int, help="Number of pyramid levels to generate for OME-Zarr.")
+    conv_group.add_argument("--scroll-axis", type=int, choices=[0, 1, 2], help="Axis to scroll for 'Scroll' output types (0=z, 1=y, 2=x).")
+    
+    # --- Group 3: Analysis Performance & Parameters ---
+    perf_group = parser.add_argument_group('Analysis Control')
     perf_group.add_argument("--z-per-slab", type=int, help="Number of Z-slices to process per slab. If not set, analyzer's default is used.")
-    perf_group.add_argument("--n-workers", type=int, help="Number of Dask worker processes. If not set, analyzer's default is used.")
-    perf_group.add_argument("--memory-limit", type=str, help="Memory limit per Dask worker (e.g., '16GB'). If not set, analyzer's default is used.")
+    perf_group.add_argument("--n-workers", type=int, help="Number of worker processes for conversion and analysis.")
+    perf_group.add_argument("--memory-limit", type=str, help="Memory limit for workers (e.g., '16GB'). For converter, uses GB value.")
+    perf_group.add_argument("--analyzer-chunk-size", type=int, nargs='+', help="Dask chunk size for analyzer (space-separated, e.g., 128 128 128).")
+    
+    # --- Group 4: Analyzer-Specific Parameters ---
+    analyzer_group = parser.add_argument_group('Analyzer-Specific Parameters')
+    analyzer_group.add_argument("--filter-size", type=int, help="[Cell] Size of the median filter kernel.")
+    analyzer_group.add_argument("--filter-sigma", type=float, help="[Vessel] Sigma of the gaussian filter.")
     
     args, unknown_args = parser.parse_known_args()
 
     logging.info("--- Step 1: Ensuring all inputs are in Zarr format ---")
 
     conversion_dir = Path(args.conversion_output_path)
-    
-    # Convert each input path and get the path to the resulting Zarr store    
-    zarr_mask_path = ensure_zarr(args.mask_path, conversion_dir, args.conversion_output_type, args.resize_shape, args.resize_order, args.chunk_size, args.force_conversion)
-    zarr_anno_path = ensure_zarr(args.annotation_path, conversion_dir, args.conversion_output_type, args.resize_shape, args.resize_order, args.chunk_size, args.force_conversion)
-    zarr_mask_path = ensure_zarr(args.mask_path, conversion_dir, args.conversion_output_type, args.resize_shape, args.resize_order, args.chunk_size, args.force_conversion) # type: ignore
-    zarr_anno_path = ensure_zarr(args.annotation_path, conversion_dir, args.conversion_output_type, args.resize_shape, args.resize_order, args.chunk_size, args.force_conversion) # type: ignore
+
+    # Convert each input path and get the path to the resulting Zarr store
+    zarr_mask_path = ensure_zarr(args.mask_path, conversion_dir, args.conversion_output_type, args.resize_shape, args.resize_order, args.chunk_size, args, args.force_conversion)
+    zarr_anno_path = ensure_zarr(args.annotation_path, conversion_dir, args.conversion_output_type, args.resize_shape, args.resize_order, args.chunk_size, args, args.force_conversion)
 
     zarr_hema_path = None
     if args.hemasphere_path:
-        zarr_hema_path = ensure_zarr(args.hemasphere_path, conversion_dir, args.conversion_output_type, args.resize_shape, args.resize_order, args.chunk_size, args.force_conversion)
-        zarr_hema_path = ensure_zarr(args.hemasphere_path, conversion_dir, args.conversion_output_type, args.resize_shape, args.resize_order, args.chunk_size, args.force_conversion) # type: ignore
+        zarr_hema_path = ensure_zarr(args.hemasphere_path, conversion_dir, args.conversion_output_type, args.resize_shape, args.resize_order, args.chunk_size, args, args.force_conversion)
 
     logging.info("--- All inputs are ready in Zarr format. ---")
     logging.info(f"Mask Zarr: {zarr_mask_path}")
@@ -193,14 +204,26 @@ def main():
 
     if zarr_hema_path:
         command.extend(["--hemasphere_path", str(zarr_hema_path)])
-        
-    # Add performance arguments if they were provided
+
+    # Add core/performance arguments if they were provided
+    if args.voxel:
+        command.extend(["--voxel", *(str(v) for v in args.voxel)])
     if args.z_per_slab is not None:
         command.extend(["--z-per-slab", str(args.z_per_slab)])
     if args.n_workers is not None:
         command.extend(["--n-workers", str(args.n_workers)])
     if args.memory_limit is not None:
         command.extend(["--memory-limit", args.memory_limit])
+    if args.analyzer_chunk_size:
+        command.extend(["--chunk-size", *(str(c) for c in args.analyzer_chunk_size)])
+
+    # Add analyzer-specific arguments
+    if args.analyzer_type == 'cell' and args.filter_size is not None:
+        command.extend(["--filter-size", str(args.filter_size)])
+    
+    if args.analyzer_type == 'vessel' and args.filter_sigma is not None:
+        command.extend(["--filter-sigma", str(args.filter_sigma)])
+
 
     # Pass through any other arguments to the analyzer script
     if unknown_args:
